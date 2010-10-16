@@ -31,6 +31,10 @@ import org.springframework.web.context.request.RequestContextHolder
 import org.springframework.web.context.support.WebApplicationContextUtils
 import org.codehaus.groovy.grails.commons.GrailsClassUtils as GCU
 import org.apache.commons.logging.LogFactory
+import javax.mail.Multipart
+import javax.mail.internet.MimeBodyPart
+import javax.mail.internet.MimeMultipart
+import javax.mail.internet.MimeMessage
 
 /**
  * The builder that implements the mail DSL.
@@ -42,7 +46,7 @@ class MailMessageBuilder {
     static HTML_CONTENTTYPES = ['text/html', 'text/xhtml']
 
     private log = LogFactory.getLog(MailMessageBuilder.class);
-    
+
     MailSender mailSender
     MailService mailService
     boolean multipart = false // by default, we're sending non-multipart emails
@@ -54,17 +58,23 @@ class MailMessageBuilder {
 
     private MailMessage getMessage() {
         if(!message) {
-            if(mailSender instanceof JavaMailSender) {
-                def helper = new MimeMessageHelper(mailSender.createMimeMessage(), multipart)
-                message = new MimeMailMessage(helper)
-            }
-            else {
-                message = new SimpleMailMessage()
-            }
-            message.from = ConfigurationHolder.config.grails.mail.default.from
-            if (ConfigurationHolder.config.grails.mail.overrideAddress)
-                message.from = ConfigurationHolder.config.grails.mail.overrideAddress
+            message = createNewMessage()
         }
+        return message
+    }
+
+    private MailMessage createNewMessage() {
+        MailMessage message
+        if (mailSender instanceof JavaMailSender) {
+            def helper = new MimeMessageHelper(mailSender.createMimeMessage(), multipart)
+            message = new MimeMailMessage(helper)
+        }
+        else {
+            message = new SimpleMailMessage()
+        }
+        message.from = ConfigurationHolder.config.grails.mail.default.from
+        if (ConfigurationHolder.config.grails.mail.overrideAddress)
+            message.from = ConfigurationHolder.config.grails.mail.overrideAddress
         return message
     }
 
@@ -105,7 +115,7 @@ class MailMessageBuilder {
     void to(List args) {
         if(args) {
 			if (ConfigurationHolder.config.grails.mail.overrideAddress)
-			   args = args.collect { ConfigurationHolder.config.grails.mail.overrideAddress }	
+			   args = args.collect { ConfigurationHolder.config.grails.mail.overrideAddress }
             getMessage().setTo((args.collect { it?.toString() }) as String[])
         }
     }
@@ -135,52 +145,162 @@ class MailMessageBuilder {
         if (params.view) {
             // Here need to render it first, establish content type of virtual response / contentType model param
             renderMailView(params.view, params.model, params.plugin)
-        } 
+        }
     }
     void text(body) {
-        getMessage().text = body?.toString()
+        def msg = getMessage()
+        if(msg instanceof MimeMailMessage) {
+            if (getNullSafeContent(msg.mimeMessage) instanceof String) {
+                multipart = true
+
+                def mp = new MimeMultipart()
+
+                mp.addBodyPart convertStringToBodyPart(msg)
+
+                def np = new MimeBodyPart()
+                np.setContent new String(body?.toString().bytes, 'utf-8'), 'text/plain; charset=UTF-8'
+                mp.addBodyPart np
+
+                msg.mimeMessage.content = mp
+            }
+            else if (getNullSafeContent(msg.mimeMessage) instanceof Multipart) {
+                def messageCopy = reparseMessage(msg.mimeMessage)
+                def originalPartIndex = 0
+
+                if (msg.mimeMessage.content.count > 1) {
+                    originalPartIndex = (0..<msg.mimeMessage.content.count).collect {
+                        messageCopy.content.getBodyPart(it)
+                    }.findIndexOf {
+                        it?.contentType.startsWith('text/html')
+                    }
+                }
+
+                if (originalPartIndex >= 0) {
+                    msg.mimeMessage.content.getBodyPart(originalPartIndex).setContent new String(body?.toString().bytes, 'utf-8'), 'text/plain; charset=UTF-8'
+                } else {
+                    def part = new MimeBodyPart()
+                    part.setContent new String(body?.toString().bytes, 'utf-8'), 'text/plain; charset=UTF-8'
+                    msg.mimeMessage.content.addBodyPart part
+                }
+            }
+            else {
+                msg.mimeMessage.setContent new String(body?.toString().bytes, 'utf-8'), 'text/plain; charset=UTF-8'
+            }
+        }
     }
+
+     /**
+     * The original MimeMessage#getContentType() will always return 'text/plain', even though the
+     * message writes to a stream correctly. This simply writes the given message to a byte array and reads
+     * it back into a new message object.
+     */
+    private MimeMessage reparseMessage(MimeMessage msg) {
+        try {
+            def stream = new ByteArrayOutputStream()
+            msg.writeTo stream
+
+            if (mailSender instanceof JavaMailSender) {
+                mailSender.createMimeMessage(new ByteArrayInputStream(stream.toByteArray()))
+            } else {
+                throw new IllegalStateException("Cannot create a MimeMessage without a JavaMailSender")
+            }
+        } catch (IOException) {
+            msg
+        }
+    }
+
+    private MimeBodyPart convertStringToBodyPart(MimeMailMessage msg) {
+        def stream = new ByteArrayOutputStream()
+        msg.mimeMessage.writeTo stream
+        def part = new MimeBodyPart(new ByteArrayInputStream(stream.toByteArray()))
+        return part
+    }
+
+    private Object getNullSafeContent(MimeMessage message) {
+        try {
+            message.content
+        } catch (IOException) {
+            null
+        }
+    }
+
     void html(text) {
         def msg = getMessage()
         if(msg instanceof MimeMailMessage) {
-            MimeMailMessage mm = msg
-            mm.getMimeMessageHelper().setText(text?.toString(), true)
+            if (getNullSafeContent(msg.mimeMessage) instanceof String) {
+                multipart = true
+
+                def mp = new MimeMultipart()
+
+                mp.addBodyPart convertStringToBodyPart(msg)
+
+                def np = new MimeBodyPart()
+                np.setContent new String(text?.toString().bytes, 'utf-8'), 'text/html; charset=UTF-8'
+                mp.addBodyPart np
+
+                msg.mimeMessage.content = mp
+            }
+            else if (getNullSafeContent(msg.mimeMessage) instanceof Multipart) {
+                def messageCopy = reparseMessage(msg.mimeMessage)
+                def originalPartIndex = 0
+
+                if (msg.mimeMessage.content.count > 1) {
+                    originalPartIndex = (0..<msg.mimeMessage.content.count).collect {
+                        messageCopy.content.getBodyPart(it)
+                    }.findIndexOf {
+                        it?.contentType.startsWith('text/plain')
+                    }
+                } else {
+                    println "WTF: ${msg.mimeMessage.content.getBodyPart(originalPartIndex).contentType}. uhh ${text}"
+                }
+
+                if (originalPartIndex >= 0) {
+                    msg.mimeMessage.content.getBodyPart(originalPartIndex).setContent new String(text?.toString().bytes, 'utf-8'), 'text/html; charset=UTF-8'
+                } else {
+                    def part = new MimeBodyPart()
+                    part.setContent new String(text?.toString().bytes, 'utf-8'), 'text/html; charset=UTF-8'
+                    msg.mimeMessage.content.addBodyPart part
+                }
+            }
+            else {
+                msg.mimeMessage.setContent new String(text?.toString().bytes, 'utf-8'), 'text/html; charset=UTF-8'
+            }
         }
     }
     void bcc(bcc) {
 	    if (ConfigurationHolder.config.grails.mail.overrideAddress)
             bcc = ConfigurationHolder.config.grails.mail.overrideAddress
-    
+
         getMessage().setBcc([bcc?.toString()] as String[])
     }
     void bcc(Object[] args) {
 		if (ConfigurationHolder.config.grails.mail.overrideAddress)
 		   args = args.collect { ConfigurationHolder.config.grails.mail.overrideAddress }.toArray()
-	
+
         getMessage().setBcc((args.collect { it?.toString() }) as String[])
     }
     void bcc(List args) {
 		if (ConfigurationHolder.config.grails.mail.overrideAddress)
 		   args = args.collect { ConfigurationHolder.config.grails.mail.overrideAddress }
-	
+
         getMessage().setBcc((args.collect { it?.toString() }) as String[])
     }
     void cc(cc) {
 	    if (ConfigurationHolder.config.grails.mail.overrideAddress)
             cc = ConfigurationHolder.config.grails.mail.overrideAddress
-	
+
         getMessage().setCc([cc?.toString()] as String[])
     }
     void cc(Object[] args) {
 		if (ConfigurationHolder.config.grails.mail.overrideAddress)
 		   args = args.collect { ConfigurationHolder.config.grails.mail.overrideAddress }.toArray()
-	
+
         getMessage().setCc((args.collect { it?.toString() }) as String[])
     }
     void cc(List args) {
 		if (ConfigurationHolder.config.grails.mail.overrideAddress)
 		   args = args.collect { ConfigurationHolder.config.grails.mail.overrideAddress }
-	
+
         getMessage().setCc((args.collect { it?.toString() }) as String[])
     }
 
@@ -273,7 +393,7 @@ class MailMessageBuilder {
 	protected String getMailViewUri(String viewName, HttpServletRequest request) {
 
         def buf = new StringBuilder(PATH_TO_MAILVIEWS)
-		
+
         if(viewName.startsWith("/")) {
            def tmp = viewName[1..-1]
            if(tmp.indexOf('/') > -1) {

@@ -22,6 +22,8 @@ import org.codehaus.groovy.grails.commons.ConfigurationHolder
 import org.springframework.mail.MailSender
 import org.springframework.mail.javamail.JavaMailSender
 import javax.mail.internet.MimeMultipart
+import org.springframework.mail.javamail.MimeMessagePreparator
+import org.springframework.mail.SimpleMailMessage
 
 /**
  * Test case for {@link MailMessageBuilder}.
@@ -36,9 +38,7 @@ class MailMessageBuilderTests extends GroovyTestCase {
 
         ConfigurationHolder.config = new ConfigObject()
         mockService = [:] as MailService
-        mockSender = [
-                createMimeMessage: {-> return new MimeMessage(Session.getInstance(new Properties())) }
-        ] as JavaMailSender
+        mockSender = new MockJavaMailSender()
         testBuilder = new MailMessageBuilder(mockService, mockSender)
     }
 
@@ -162,6 +162,69 @@ class MailMessageBuilderTests extends GroovyTestCase {
         def attachment = msg.content.getBodyPart(1)
         assertEquals "abcdef", attachment.content.text
         assertEquals "dummy.bin", attachment.fileName
+
+        assert msg.content.getBodyPart(0).content == 'How are you?'
+    }
+
+    void testHtmlContentType() {
+        processDsl {
+            html '<html><head></head><body>How are you?</body></html>'
+        }
+
+        def msg = reparseMessage(testBuilder.createMessage().mimeMessage)
+
+        assert msg.contentType == 'text/html; charset=UTF-8'
+        assert msg.content == '<html><head></head><body>How are you?</body></html>'
+    }
+
+    void testMultipart_html_first() {
+        processDsl {
+            multipart true
+            html '<html><head></head><body>How are you?</body></html>'
+            text 'How are you?'
+        }
+
+        def msg = testBuilder.createMessage().mimeMessage
+
+        assert msg.content instanceof MimeMultipart
+        MimeMultipart mp = msg.content
+        assert mp.count == 2
+        assert mp.getBodyPart(0).contentType.startsWith('text/html')
+        assert mp.getBodyPart(0).content == '<html><head></head><body>How are you?</body></html>'
+
+        assert mp.getBodyPart(1).contentType.startsWith('text/plain')
+        assert mp.getBodyPart(1).content == 'How are you?'
+    }
+
+    void testMultipart_text_first() {
+        processDsl {
+            multipart true
+            text 'How are you?'
+            html '<html><head></head><body>How are you?</body></html>'
+        }
+
+        def msg = testBuilder.createMessage().mimeMessage
+
+        assert msg.content instanceof MimeMultipart
+        MimeMultipart mp = msg.content
+        assert mp.count == 2
+        assert mp.getBodyPart(0).contentType.startsWith('text/html')
+        assert mp.getBodyPart(0).content == '<html><head></head><body>How are you?</body></html>'
+
+        assert mp.getBodyPart(1).contentType.startsWith('text/plain')
+        assert mp.getBodyPart(1).content == 'How are you?'
+    }
+
+    /**
+     * The original MimeMessage#getContentType() will always return 'text/plain', even though the
+     * message writes to a stream correctly. This simply writes the given message to a byte array and reads
+     * it back into a new message object.
+     */
+    private MimeMessage reparseMessage(MimeMessage msg) {
+        def stream = new ByteArrayOutputStream()
+        msg.writeTo stream
+        def realMessage = new MimeMessage(Session.getInstance(new Properties()), new ByteArrayInputStream(stream.toByteArray()))
+        return realMessage
     }
 
     private List to(MimeMessage msg) {
@@ -179,5 +242,41 @@ class MailMessageBuilderTests extends GroovyTestCase {
     private processDsl(Closure c) {
         c.delegate = this.testBuilder
         c.call()
+    }
+}
+
+
+class MockJavaMailSender implements JavaMailSender {
+
+    MimeMessage createMimeMessage() {
+        new MimeMessage(Session.getInstance(new Properties()))
+    }
+
+    MimeMessage createMimeMessage(InputStream inputStream) {
+        new MimeMessage(Session.getInstance(new Properties()), inputStream)
+    }
+
+    void send(MimeMessage mimeMessage) {
+        throw new UnsupportedOperationException()
+    }
+
+    void send(MimeMessage[] mimeMessages) {
+        throw new UnsupportedOperationException()
+    }
+
+    void send(MimeMessagePreparator mimeMessagePreparator) {
+        throw new UnsupportedOperationException()
+    }
+
+    void send(MimeMessagePreparator[] mimeMessagePreparators) {
+        throw new UnsupportedOperationException()
+    }
+
+    void send(SimpleMailMessage simpleMailMessage) {
+        throw new UnsupportedOperationException()
+    }
+
+    void send(SimpleMailMessage[] simpleMailMessages) {
+        throw new UnsupportedOperationException()
     }
 }
